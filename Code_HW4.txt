@@ -28,7 +28,7 @@ with open(file_path, 'r') as file:
             if len(url_click) == 2:
                 url = url_click[0]
                 clicks = int(url_click[1])
-                parsed_data.append((term, url, clicks))
+                parsed_data.append((term.strip(), url.strip(), clicks))
 
 
 columns = ["term", "url", "clicks"] 
@@ -53,13 +53,25 @@ print(f"Data successfully processed and saved")
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 from flask import Flask, request, jsonify
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import sum as spark_sum, col, count
-import re
 from urllib.parse import urlparse
+from collections import OrderedDict
 
 app = Flask(__name__)
+app.json.sort_keys = False
 
 # Initialize Spark session
 spark = SparkSession \
@@ -91,136 +103,75 @@ def get_results():
     data = request.get_json()
     search_term = data.get('term', '')
     
-    if not df:
-        return jsonify({"error": "Data not loaded"}), 500
-    
     # Query for the search term
     results_df = spark.sql(f"""
-        SELECT url, SUM(clicks) as total_clicks
+        SELECT url, clicks
         FROM search_data
         WHERE term = '{search_term}'
-        GROUP BY url
-        ORDER BY total_clicks DESC
+        ORDER BY clicks DESC 
     """).collect()
     
-    # Convert to dictionary and sort by clicks and domain priority
-    results = {row['url']: row['total_clicks'] for row in results_df}
-    sorted_results = dict(sorted(results.items(), 
-                               key=lambda item: (-item[1], get_domain_priority(item[0]))))
-    
-    return jsonify({"results": sorted_results})
+    # Convert to list of tuples and sort in Python
+    results = [(row['url'], row['clicks']) for row in results_df]
+    # Sort by clicks descending, then by domain priority
+    results.sort(key=lambda x: (-x[1], get_domain_priority(x[0])))
 
-@app.route('/popularity', methods=['POST'])
-def get_popularity():
-    data = request.get_json()
-    url = data.get('url', '')
+    ordered_results = OrderedDict()
+    for row in results:
+        ordered_results[row[0]] = row[1]
     
-    if not df:
-        return jsonify({"error": "Data not loaded"}), 500
-    
-    total_clicks = spark.sql(f"""
-        SELECT SUM(clicks) as total
-        FROM search_data
-        WHERE url = '{url}'
-    """).collect()[0]['total']
-    
-    return jsonify({"clicks": total_clicks})
-
-@app.route('/getBestTerms', methods=['POST'])
-def get_best_terms():
-    data = request.get_json()
-    website = data.get('website', '')
-    
-    if not df:
-        return jsonify({"error": "Data not loaded"}), 500
-    
-    # Get total clicks for the website
-    total_website_clicks = spark.sql(f"""
-        SELECT SUM(clicks) as total
-        FROM search_data
-        WHERE url = '{website}'
-    """).collect()[0]['total']
-    
-    if not total_website_clicks:
-        return jsonify({"best_terms": []})
-    
-    # Get terms where clicks for this website are >5% of total website clicks
-    threshold = 0.05 * total_website_clicks
-    
-    best_terms_df = spark.sql(f"""
-        SELECT term, SUM(clicks) as term_clicks
-        FROM search_data
-        WHERE url = '{website}'
-        GROUP BY term
-        HAVING term_clicks > {threshold}
-    """).collect()
-    
-    best_terms = [row['term'] for row in best_terms_df]
-    
-    return jsonify({"best_terms": best_terms})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    return jsonify({"results": ordered_results})
 
 @app.route('/trends', methods=['POST'])
 def get_trends():
     data = request.get_json()
     search_term = data.get('term', '')
-    
-    if not df:
-        return jsonify({"error": "Data not loaded"}), 500
-    
+
     total_clicks = spark.sql(f"""
         SELECT SUM(clicks) as total
         FROM search_data
         WHERE term = '{search_term}'
-    """).collect()[0]['total']
+    """).collect()
     
-    return jsonify({"clicks": total_clicks})
+    return jsonify({"clicks": total_clicks[0]['total']})
 
 @app.route('/popularity', methods=['POST'])
 def get_popularity():
     data = request.get_json()
     url = data.get('url', '')
     
-    if not df:
-        return jsonify({"error": "Data not loaded"}), 500
-    
     total_clicks = spark.sql(f"""
         SELECT SUM(clicks) as total
         FROM search_data
         WHERE url = '{url}'
-    """).collect()[0]['total']
+    """).collect()
     
-    return jsonify({"clicks": total_clicks})
+    return jsonify({"clicks": total_clicks[0]['total']})
 
 @app.route('/getBestTerms', methods=['POST'])
 def get_best_terms():
     data = request.get_json()
     website = data.get('website', '')
     
-    if not df:
-        return jsonify({"error": "Data not loaded"}), 500
-    
     # Get total clicks for the website
     total_website_clicks = spark.sql(f"""
         SELECT SUM(clicks) as total
         FROM search_data
         WHERE url = '{website}'
-    """).collect()[0]['total']
+    """).collect()
+    
+    total_website_clicks = total_website_clicks[0]['total']
     
     if not total_website_clicks:
         return jsonify({"best_terms": []})
     
-    # Get terms where clicks for this website are >5% of total website clicks
-    threshold = 0.05 * total_website_clicks
     
     best_terms_df = spark.sql(f"""
         SELECT term, SUM(clicks) as term_clicks
         FROM search_data
         WHERE url = '{website}'
         GROUP BY term
-        HAVING term_clicks > {threshold}
+        HAVING term_clicks > {0.05 * total_website_clicks}
     """).collect()
     
     best_terms = [row['term'] for row in best_terms_df]
